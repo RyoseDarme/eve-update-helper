@@ -1,0 +1,6 @@
+图标来源：用户提供的 b_571d3e4aba5e5f7918c97aebb694dd32.png.jpg。
+处理方式：内置 image_gen 编辑工具，透明背景；随后只做 Windows ICO 格式封装及尺寸适配。
+项目资源：app-icon-rounded.png；app.ico（16/24/32/48/64/128/256 像素）。
+
+最终编辑提示词：
+Edit target: the supplied square image. Create a Windows app icon asset. Preserve the entire original illustration exactly: same pink-haired chibi character in orange fish costume, underwater teal background, paint texture, pose, eyes, colors, and original framing. ONLY apply a subtle rounded-square clipping mask with corner radius about 4% of image width. Keep the whole image square; remove only the very small areas outside the four rounded corners to actual transparent alpha. No repainting, no new elements, no text, no borders, no shadow, no extra padding. The interior and all straight edges must remain unchanged.

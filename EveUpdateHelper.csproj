@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>EveUpdateHelper</AssemblyName>
+    <Title>掘墓的EVE更新助手</Title>
+    <Product>掘墓的EVE更新助手</Product>
+    <Company>WC飞机杯大王掘墓</Company>
+    <Description>参考 CloudflareSpeedTest 与 LLC BABEL 的节点优选方案，独立实现的 EVE 更新助手。</Description>
+    <Version>2.3.0</Version>
+    <ApplicationIcon>assets\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="assets\cloudfront-prefixes.json" />
+  </ItemGroup>
+</Project>
