@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
@@ -17,6 +17,29 @@ internal static class HostsManager
     const string End = "# END EVE UPDATE HELPER";
     internal static string SystemHosts => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "drivers", "etc", "hosts");
     static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
+
+    internal static Dictionary<string, List<string>> ReadMappings(byte[] bytes)
+    {
+        var mappings = NetworkScanner.Domains.ToDictionary(d => d, _ => new List<string>());
+        using var stream = new MemoryStream(bytes);
+        using var reader = new StreamReader(stream, Encoding.Latin1, detectEncodingFromByteOrderMarks: true);
+        while (reader.ReadLine() is { } line)
+        {
+            var parts = line.Split('#')[0].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || !System.Net.IPAddress.TryParse(parts[0], out var address)) continue;
+            foreach (var name in parts.Skip(1))
+                if (mappings.TryGetValue(name.ToLowerInvariant(), out var ips)) ips.Add(address.ToString());
+        }
+        return mappings;
+    }
+
+    internal static void VerifyMappings(byte[] bytes, IReadOnlyDictionary<string, string> expected)
+    {
+        var actual = ReadMappings(bytes);
+        foreach (var (domain, ip) in expected)
+            if (!actual.TryGetValue(domain, out var found) || found.Count != 1 || found[0] != ip)
+                throw new IOException($"{domain} 写入核对失败：必须仅保留一条本轮已验证的 IP。");
+    }
 
     internal static byte[] Rewrite(byte[] bytes, IReadOnlyDictionary<string, string> addresses)
     {
@@ -73,6 +96,7 @@ internal static class HostsManager
     {
         var before = File.ReadAllBytes(hostsPath);
         var after = Rewrite(before, addresses);
+        VerifyMappings(after, addresses);
         if (before.SequenceEqual(after)) return "hosts 已使用本次节点，无需重复写入。";
         var suffix = DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N");
         var backup = hostsPath + ".evehelper-" + suffix + ".bak";
@@ -87,12 +111,15 @@ internal static class HostsManager
             if (!before.SequenceEqual(File.ReadAllBytes(hostsPath))) throw new IOException("hosts 在操作期间被其他程序修改，请重试。");
             File.Replace(temp, hostsPath, backup);
             replaced = true;
+            var stored = File.ReadAllBytes(hostsPath);
+            if (!stored.SequenceEqual(after)) throw new IOException("hosts 写入后被其他程序修改，请检查文件。");
+            VerifyMappings(stored, addresses);
             File.Move(stateTemp, statePath, overwrite: true);
-            return $"{addresses.Count} 个 EVE 更新域名已写入。\r\n备份：" + backup;
+            return $"{addresses.Count} 个 EVE 更新域名已写入，旧记录已整理，每域仅保留一条已验证 IP。\r\n备份：" + backup;
         }
         catch
         {
-            if (replaced)
+            if (replaced && File.ReadAllBytes(hostsPath).SequenceEqual(after))
             {
                 File.WriteAllBytes(temp, before);
                 File.Replace(temp, hostsPath, null);
@@ -154,44 +181,15 @@ internal static class ElevatedOperation
             if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
                 throw new UnauthorizedAccessException("写入或恢复 hosts 需要管理员权限。");
             string message;
-            IReadOnlyDictionary<string, NodeResult>? selectedForDiagnostics = null;
             if (operation == "--apply")
             {
                 if (new FileInfo(planPath).Length > 64 * 1024) throw new IOException("应用记录大小异常。");
                 var plan = JsonSerializer.Deserialize<ApplyPlan>(File.ReadAllText(planPath)) ?? throw new IOException("应用记录损坏。");
-                var age = DateTime.Now - plan.TestedAt;
-                if (age.TotalMinutes > 30 || age.TotalSeconds < -60) throw new IOException("测速结果已过期，请重新测速。");
-                if (!NetworkScanner.DownloadDomains.All(d => plan.Nodes.Count(n => n.Domain == d) == 1) ||
-                    plan.Nodes.Any(n => !NetworkScanner.Domains.Contains(n.Domain)) || plan.Nodes.GroupBy(n => n.Domain).Any(g => g.Count() != 1))
-                    throw new IOException("必须有五个文件下载域名（含两个 -fallback）的独立持续测速结果；旧启动器界面域名可选。");
-                if (!NetworkScanner.CanApply(new ScanResult(plan.Nodes, plan.Nodes.ToDictionary(n => n.Domain), plan.TestedAt)))
-                    throw new IOException("应用记录包含未完整通过持续下载、小请求或域名验证的节点，请重新测速。");
-                if (ConnectionDiagnostics.LauncherProcesses().Count > 0)
-                    throw new IOException("EVE 启动器仍在运行（可能缩到托盘）。请从托盘完全退出启动器，再应用节点。");
-                int checkedNodes = 0;
-                int CheckPercent() => 10 + checkedNodes * 40 / plan.Nodes.Count;
-                foreach (var node in plan.Nodes)
-                {
-                    Progress(CheckPercent(), $"复核节点 {checkedNodes + 1}/{plan.Nodes.Count}",
-                        $"{node.Domain}\r\n确认该节点仍可下载，尚未修改 hosts。每个节点可能需要数秒。" );
-                    if (!node.Success || (node.Domain != NetworkScanner.Domains[2] &&
-                        (node.Bytes < 128 * 1024 || !double.IsFinite(node.SpeedMBps) || node.SpeedMBps <= 0 ||
-                            node.RequiredSeconds is not (8 or 10 or 12 or 15 or 20 or 30) || node.MeasuredSeconds < node.RequiredSeconds - .5)))
-                        throw new IOException("不能应用未成功下载的节点。");
-                    var check = await NetworkScanner.TestNode(node.Domain, node.IP, "应用前复核", node.TestUrl, true, CancellationToken.None, 3,
-                        progress: s => Progress(CheckPercent() + 3, $"复核节点 {checkedNodes + 1}/{plan.Nodes.Count}", s),
-                        additionalUrls: node.AdditionalUrls,
-                        sampleProgress: n => Progress(CheckPercent() + Math.Clamp((int)(n.MeasuredSeconds / 3 * 4), 0, 4),
-                            $"复核节点 {checkedNodes + 1}/{plan.Nodes.Count}", node.Domain + "\r\n" + n.Detail));
-                    if (!check.Success) throw new IOException($"{node.Domain} 应用前复核失败：{check.Detail}。hosts 未修改。");
-                    checkedNodes++;
-                }
-                Progress(55, "备份并写入 hosts", "正在保存原设置，分别写入通过验证的下载节点…");
-                message = HostsManager.Apply(HostsManager.SystemHosts, plan.Nodes.ToDictionary(n => n.Domain, n => n.IP));
-                selectedForDiagnostics = plan.Nodes.ToDictionary(n => n.Domain, n => n);
+                message = ApplyWorkflow.Apply(HostsManager.SystemHosts, plan, DateTime.Now,
+                    () => ConnectionDiagnostics.LauncherProcesses().Count > 0, Progress);
             }
             else { Progress(55, "恢复原设置", "正在校验备份并恢复 hosts…"); message = HostsManager.Restore(HostsManager.SystemHosts); }
-            Progress(70, "刷新 DNS 缓存", "hosts 操作完成，正在刷新系统 DNS。之后将检查实际连接地址。" );
+            Progress(70, "刷新 DNS 缓存", "本地写入核对完成，正在刷新系统 DNS；无需再次下载测速。" );
             try
             {
                 using var process = Process.Start(new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ipconfig.exe"), "/flushdns")
@@ -203,11 +201,9 @@ internal static class ElevatedOperation
                 message += process.ExitCode == 0 ? "\r\nDNS 缓存已刷新，请完全退出并重新打开 EVE 启动器。" : "\r\nDNS 刷新失败，请手动运行 ipconfig /flushdns。";
             }
             catch { message += "\r\nDNS 刷新失败，请手动运行 ipconfig /flushdns。"; }
-            Progress(80, "检查实际连接", "正在核对系统解析和 HTTPS 实际连接地址。\r\n连接较慢时，请等待检查结束。" );
-            message += "\r\n" + await ConnectionDiagnostics.InspectAsync(selectedForDiagnostics,
-                s => Progress(85, "检查实际连接", s), CancellationToken.None);
+            message += "\r\n应用未进行联网复测。请重新打开启动器；需要排查下载时再点击「下载诊断」。";
             File.WriteAllText(output, JsonSerializer.Serialize(new OperationResult(true, message), Program.JsonOptions));
-            Progress(100, "操作完成", "请重新打开 EVE 启动器。详细连接检查结果见主窗口日志。" );
+            Progress(100, "操作完成", "请重新打开 EVE 启动器。已核对 hosts，无需重复测速。" );
         }
         catch (Exception ex)
         {

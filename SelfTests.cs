@@ -15,6 +15,7 @@ internal static class SelfTests
             report.Add("PASS: " + description);
         }
         UpdateTests.Run(Check);
+        report.Add(ApplyTests.Run(Check));
         var addresses = new Dictionary<string, string>
         {
             [NetworkScanner.Domains[0]] = "18.65.14.45",
@@ -166,14 +167,32 @@ internal static class SelfTests
             var quickOrder = QuickPlanner.Rank([new("18.65.14.45", 1, 1, 4), new("65.8.76.123", 50, 4, 4), new("3.170.229.35", 20, 4, 4), new("13.1.1.1", 0, 0, 4)]);
             Check(quickOrder.Select(n => n.IP).SequenceEqual(new[] { "3.170.229.35", "65.8.76.123", "18.65.14.45" }),
                 "quick ranks by TCP success ratio then latency and excludes unreachable addresses");
+            var coarse = Enumerable.Range(1, 220).Select(i => new TcpSample("18.65.14." + i, i, 1, 1))
+                .Append(new TcpSample("13.1.1.1", 0, 0, 1));
+            var refined = QuickPlanner.ForConfirmation(coarse, ["18.65.14.220", "13.1.1.1"]);
+            Check(refined.Length == QuickPlanner.ConfirmationLimit + 1 && refined.Contains("18.65.14.220") && !refined.Contains("13.1.1.1"),
+                "quick refines a bounded shortlist plus reachable local candidates, retaining a slower hosts node");
+            Check(QuickPlanner.ForConfirmation([], ["18.65.14.1"]).Length == 0,
+                "failed coarse TCP pool produces no download candidates");
+            var baselineOrder = QuickPlanner.ForDownloads(coarse, ["18.65.14.220"]);
+            Check(baselineOrder.Length == 10 && baselineOrder[0].IP == "18.65.14.220" && baselineOrder.Select(n => n.IP).Distinct().Count() == 10,
+                "quick includes one current hosts baseline within its original candidate limit without repeating an IP");
             var quickCalls = new List<(string Domain, string IP, int Seconds)>();
+            var ownVerification = QuickPlanner.VerificationIPs([example with { Success = true, SpeedMBps = 80 }],
+                ["13.35.202.129"], [new("13.35.202.129", 100, 4, 4), new(example.IP, 20, 4, 4)], ["13.35.202.129"]);
+            Check(ownVerification[0] == "13.35.202.129" && ownVerification.Contains(example.IP) && ownVerification.Distinct().Count() == ownVerification.Length,
+                "each domain retains its own current route before cross-domain resource candidates without duplicating an IP");
+            Check(!QuickPlanner.CanCompareMore(100, true) && QuickPlanner.CanCompareMore(150, true) && QuickPlanner.CanCompareMore(100, false),
+                "quick reserves time for remaining domains after obtaining a resource result instead of exhausting comparisons");
+            var tcpCalls = new System.Collections.Concurrent.ConcurrentBag<(string IP, int Repeats)>();
             ScanResult RunQuickFixture(bool failFallback = false, bool zeroFirst = false, bool largePool = false)
             {
                 quickCalls.Clear();
+                tcpCalls.Clear();
                 var fastHooks = new ScanHooks
                 {
                     Catalog = _ => Task.FromResult(new CdnCatalog([new(largePool ? "65.0.0.0/12" : "65.8.0.0/20", "GLOBAL")], "fixture", "fixture")),
-                    Dns = hooks.Dns, Tcp = hooks.Tcp,
+                    Dns = hooks.Dns, Tcp = (ip, repeats, token) => { tcpCalls.Add((ip, repeats)); return hooks.Tcp!(ip, repeats, token); },
                     Https = (_, _) => throw new Exception("Quick must not run the HEAD survey"),
                     Survey = (_, _) => throw new Exception("Quick must not run short survey downloads"),
                     Parallel = (_, _) => throw new Exception("Quick must not run parallel calibration"),
@@ -199,6 +218,11 @@ internal static class SelfTests
             Check(NetworkScanner.DownloadDomains.All(d => quickPipeline.Best[d].Domain == d && new Uri(quickPipeline.Best[d].TestUrl).Host == d),
                 "quick winners preserve actual individual TLS hostnames and URLs");
             var quickFailedAlias = RunQuickFixture(failFallback: true);
+            int secondFallback = quickCalls.FindIndex(quickCalls.FindIndex(n => n.Domain == EveDomains.BinaryFallback) + 1,
+                n => n.Domain == EveDomains.BinaryFallback);
+            Check(NetworkScanner.DownloadDomains.Where(d => d != EveDomains.Resources).All(d =>
+                quickCalls.FindIndex(n => n.Domain == d) < secondFallback),
+                "failed fallback retries wait until every required domain has had its first independent download attempt");
             Check(!NetworkScanner.CanApply(quickFailedAlias) && !quickFailedAlias.Best.ContainsKey(EveDomains.BinaryFallback) &&
                 quickCalls.Count(n => n.Domain == EveDomains.BinaryFallback) > 1,
                 "failed quick fallback verification retries candidates and blocks hosts application if all fail");
@@ -209,6 +233,9 @@ internal static class SelfTests
             var quickLimited = RunQuickFixture(largePool: true);
             Check(quickLimited.Coverage is { SampledIPs: 2048, TcpProbed: 2049 } && NetworkScanner.CanApply(quickLimited),
                 "quick bounds the sampled CDN pool while retaining the independently supplied DNS candidate");
+            Check(tcpCalls.Count(c => c.Repeats == 1) == 2049 && tcpCalls.Count(c => c.Repeats == 4) <= 129 &&
+                tcpCalls.Any(c => c.IP == "18.65.14.45" && c.Repeats == 4),
+                "quick scans once then repeats only confirmed shortlist instead of all two thousand addresses four times");
             using (var quickStop = new CancellationTokenSource())
             {
                 var stopHooks = new ScanHooks
@@ -351,6 +378,13 @@ internal static class SelfTests
             Check(aliasLog.Files[EveDomains.BinaryFallback].Single().EndsWith("/ab/abc_def") && aliasLog.Build == "3646012" &&
                 aliasLog.Progress.Single() == "Downloaded 1.53 MiB/17.52 MiB at 53.51 kiB/s",
                 "diagnostics extract fallback requests, build and speed without retaining authentication lines or query strings");
+            var currentRouting = LauncherLogInspector.Parse("connect ETIMEDOUT binaries-fallback.eveonline.com:443\n" +
+                "[cdn-hosts] Preferring https://binaries.eveonline.com/ for binaries until the next refresh\n" +
+                "[cdn-hosts] Preferring https://resources.eveonline.com/ for resources until the next refresh\n" +
+                "[cdn-hosts] Preferring https://unknown.example/ for resources until the next refresh\n");
+            Check(currentRouting.PreferredHosts["binaries"] == EveDomains.Binaries &&
+                currentRouting.PreferredHosts["resources"] == EveDomains.Resources && currentRouting.TimeoutHosts.ContainsKey(EveDomains.BinaryFallback),
+                "diagnostics identify actual CDN selection and fallback timeouts without trusting unrelated hosts");
             Check(CandidatePlanner.Quick([baselineNode, example with { IP = "3.170.229.35", Source = "关联域名 hosts", LatencyMs = 500 }])
                 .Any(n => n.IP == "3.170.229.35"), "existing sibling hosts node reaches fallback download verification despite higher latency");
             var familyCache = NetworkScanner.Domains.ToDictionary(d => d, _ => new Dictionary<string, string>());
@@ -457,7 +491,7 @@ internal static class SelfTests
             try { HostsManager.Apply(readOnlyPath, addresses); } catch (UnauthorizedAccessException) { rejected = true; }
             finally { File.SetAttributes(readOnlyPath, FileAttributes.Normal); }
             Check(rejected && File.ReadAllBytes(readOnlyPath).SequenceEqual(bytes), "write failure preserves original hosts");
-            return string.Join(Environment.NewLine, report) + $"\r\nTOTAL: {report.Count} checks passed\r\n";
+            return string.Join(Environment.NewLine, report) + $"\r\nTOTAL: {report.Count(s => s.StartsWith("PASS:"))} checks passed\r\n";
         }
         finally
         {

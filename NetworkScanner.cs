@@ -302,13 +302,14 @@ internal sealed partial class NetworkScanner(Action<string> log, Action<NodeResu
     internal static async Task<NodeResult> TestNode(string domain, string ip, string source,
         string url, bool download, CancellationToken ct, int seconds = 20, Action<string>? progress = null, string[]? additionalUrls = null,
         Func<HttpClient>? clientFactory = null, Func<double>? testElapsedSeconds = null, Action<NodeResult>? sampleProgress = null,
-        bool varyRange = false, bool compareDecoded = false)
+        bool varyRange = false, bool compareDecoded = false, int connectWaitSeconds = 10)
     {
         if (!Domains.Contains(domain) || !PublicIPv4(ip)) throw new ArgumentException("不允许的测速域名或 IP。");
         var uri = new Uri(url);
         if (uri.Scheme != "https" || uri.Host != domain || !uri.IsDefaultPort || uri.UserInfo.Length != 0)
             throw new ArgumentException("测速地址必须是对应 EVE 域名的 HTTPS 文件。");
         if (seconds is < 3 or > 60) throw new ArgumentOutOfRangeException(nameof(seconds));
+        if (connectWaitSeconds is < 1 or > 10) throw new ArgumentOutOfRangeException(nameof(connectWaitSeconds));
         double latency = 0;
         string region = "";
         var meter = new TransferMeter(2);
@@ -334,7 +335,7 @@ internal sealed partial class NetworkScanner(Action<string> log, Action<NodeResu
                 return new NodeResult(domain, ip, source, true, latency, 0, 0, region, "HTTPS 已验证，等待持续下载测速", url);
             }
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            timeout.CancelAfter(TimeSpan.FromSeconds(connectWaitSeconds));
             int nextProgress = 5;
             double nextRow = 1;
             long totalLength = 0;

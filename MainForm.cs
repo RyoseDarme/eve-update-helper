@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json;
 
 namespace EveUpdateHelper;
@@ -6,7 +6,7 @@ namespace EveUpdateHelper;
 internal sealed partial class MainForm : Form
 {
     readonly Button scan = Button("开始测速", Color.FromArgb(41, 106, 230));
-    readonly Button apply = Button("应用并检查", Color.FromArgb(30, 132, 94));
+    readonly Button apply = Button("应用节点", Color.FromArgb(30, 132, 94));
     readonly Button restore = Button("恢复原设置", Color.FromArgb(72, 83, 103));
     readonly Button cancel = Button("停止", Color.FromArgb(72, 83, 103));
     readonly Button diagnose = Button("下载诊断", Color.FromArgb(72, 83, 103));
@@ -77,7 +77,7 @@ internal sealed partial class MainForm : Form
         toolbar.Controls.Add(export);
         apply.Enabled = false; cancel.Enabled = false;
         layout.Controls.Add(toolbar, 0, 2);
-        summary.Text = "默认快速：参考原程序，TCP 排序后直接下载，找到 3 个有效资源节点即确认其他域名。\r\n主测速 10 秒，其余下载域名独立确认 8 秒；快速最多 3 分钟。标准扩大搜索，精校准保留长测。\r\n包含两个 -fallback 域名；零速度和失败结果不可应用。测速完成后完全退出启动器，再应用节点。";
+        summary.Text = "默认快速：参考原程序，TCP 先粗筛再复测候选，找到 3 个有效资源节点即确认其他域名。\r\n主测速 10 秒，其余下载域名独立确认 8 秒；快速最多 3 分钟。标准扩大搜索，精校准保留长测。\r\n含两个 -fallback；应用时清理重复记录，不再联网复测。测速后完全退出启动器，再应用节点。";
         summary.Font = new Font("Microsoft YaHei UI", 9);
         summary.Dock = DockStyle.Fill;
         summary.Padding = new Padding(12, 10, 12, 0);
@@ -131,6 +131,7 @@ internal sealed partial class MainForm : Form
         credits.Controls.Add(vpn);
         layout.Controls.Add(credits, 0, 7);
         Log("请先关闭游戏加速器的全局代理 / TUN，再测直连节点。应用后需要重启 EVE 启动器。");
+        WarnDuplicateMappings();
         scan.Click += async (_, _) => await Scan();
         cancel.Click += (_, _) => { cancellation?.Cancel(); status.Text = "正在停止…"; };
         apply.Click += async (_, _) => await ChangeHosts(false);
@@ -258,6 +259,7 @@ internal sealed partial class MainForm : Form
 
     async Task Scan()
     {
+        WarnDuplicateMappings();
         latest = null; pendingRows.Clear(); indexedRows.Clear(); grid.Rows.Clear(); Busy(true, true);
         summary.BackColor = Color.FromArgb(230, 237, 249);
         cancellation = new CancellationTokenSource();
@@ -271,7 +273,7 @@ internal sealed partial class MainForm : Form
             latest = await Task.Run(() => new NetworkScanner(Log, Row, mode: selectedMode, additionalCandidates: suppliedCandidates).RunAsync(token), token);
             while (!pendingRows.IsEmpty) FlushRows();
             summary.Text = NetworkScanner.CanApply(latest)
-                ? "测速完成，尚未应用：请完全退出 EVE 启动器，然后点击「应用并检查」。\r\n" +
+                ? "测速完成，尚未应用：请完全退出 EVE 启动器，然后点击「应用节点」。\r\n" +
                     string.Join("  |  ", NetworkScanner.Domains.Where(latest.Best.ContainsKey).Select(d => $"{d.Replace(".eveonline.com", "")} → {latest.Best[d].IP}")) +
                     "\r\n五个下载域名均已独立通过持续下载；旧界面域名可选。"
                 : "五个下载域名尚未全部通过持续验证（含两个 -fallback），不能应用。查看日志中的具体原因。";
@@ -283,7 +285,7 @@ internal sealed partial class MainForm : Form
                 if (r.Tag is NodeResult node && latest.Best.TryGetValue(node.Domain, out var winner) && node.IP == winner.IP)
                     r.DefaultCellStyle.BackColor = Color.FromArgb(222, 243, 229);
             if (grid.Rows.Count > 0) grid.FirstDisplayedScrollingRowIndex = 0;
-            Log(NetworkScanner.CanApply(latest) ? $"用时 {latest.ElapsedSeconds:F1} 秒。绿色行是已验证推荐节点；尚未改动 hosts。请点击「应用并检查」。" :
+            Log(NetworkScanner.CanApply(latest) ? $"用时 {latest.ElapsedSeconds:F1} 秒。绿色行是已验证推荐节点；尚未改动 hosts。请点击「应用节点」。" :
                 $"用时 {latest.ElapsedSeconds:F1} 秒；有效验证未齐全。可选择较长模式重测，hosts 未修改。");
         }
         catch (OperationCanceledException) { summary.Text = "测速已停止，hosts 未修改。"; Log("已停止测速。"); }
@@ -296,7 +298,7 @@ internal sealed partial class MainForm : Form
         if (!restoreOriginal && !NetworkScanner.CanApply(latest)) return;
         if (!restoreOriginal && ConnectionDiagnostics.LauncherProcesses().Count > 0)
         {
-            Log("EVE 启动器仍在运行。请在系统托盘完全退出启动器，再点击「应用并检查」。");
+            Log("EVE 启动器仍在运行。请在系统托盘完全退出启动器，再点击「应用节点」。");
             MessageBox.Show(this, "请在系统托盘完全退出 EVE 启动器，再应用节点。\r\n关闭窗口可能只是最小化到托盘，旧连接仍可能继续使用。", "先退出启动器");
             return;
         }
@@ -314,7 +316,7 @@ internal sealed partial class MainForm : Form
         try
         {
             File.WriteAllText(planPath, JsonSerializer.Serialize(new ApplyPlan(latest?.Best.Values.ToList() ?? [], latest?.TestedAt ?? DateTime.Now), Program.JsonOptions));
-            Log(restoreOriginal ? "申请管理员权限以恢复 hosts…" : "申请管理员权限，复核节点后应用 hosts…");
+            Log(restoreOriginal ? "申请管理员权限以恢复 hosts…" : "申请管理员权限，直接应用已通过的节点，不重复测速…");
             var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = true, Verb = "runas" };
             start.ArgumentList.Add(restoreOriginal ? "--restore" : "--apply");
             start.ArgumentList.Add(planPath);
@@ -341,10 +343,10 @@ internal sealed partial class MainForm : Form
             {
                 summary.BackColor = Color.FromArgb(222, 243, 229);
                 summary.Text = restoreOriginal ? "已恢复最近一次应用前的设置。请重新打开 EVE 启动器。" :
-                    "验证通过的更新域名已写入 hosts，已尝试刷新 DNS。实际连接检查结果见日志。\r\n现在重新打开 EVE 启动器更新；不要只看测速结果判断是否已生效。\r\n若仍慢，点击「检查生效」并「导出日志」，同时查看 EVE 启动器的下载日志。";
+                    "已写入本轮验证节点，并核对每域只有一条 IP；已尝试刷新 DNS。\r\n应用不再重复测速。现在重新打开 EVE 启动器更新。\r\n如仍有问题，再点击「下载诊断」查看启动器实际连接。";
                 if (restoreOriginal) latest = null;
             }
-            var dialogText = result.Success ? result.Message.Split('\n')[0] + "\r\n实际连接检查结果请查看日志。请重新打开 EVE 启动器。" : result.Message;
+            var dialogText = result.Success ? result.Message.Split('\n')[0] + "\r\n已核对本地设置。请重新打开 EVE 启动器。" : result.Message;
             progressDialog.Finish(result.Success, dialogText);
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223) { Log("你取消了管理员权限申请，hosts 未修改。"); progressDialog.Finish(false, "管理员权限申请已取消，hosts 未修改。"); }

@@ -14,16 +14,7 @@ internal static class ConnectionDiagnostics
 
     internal static Dictionary<string, List<string>> ReadMappings(string hostsPath)
     {
-        var mappings = NetworkScanner.Domains.ToDictionary(d => d, _ => new List<string>());
-        foreach (var line in File.ReadAllLines(hostsPath))
-        {
-            var body = line.Split('#')[0].Trim();
-            var parts = body.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2 || !IPAddress.TryParse(parts[0], out _)) continue;
-            foreach (var name in parts.Skip(1))
-                if (mappings.TryGetValue(name.ToLowerInvariant(), out var addresses)) addresses.Add(parts[0]);
-        }
-        return mappings;
+        return HostsManager.ReadMappings(File.ReadAllBytes(hostsPath));
     }
 
     internal static async Task<string> InspectAsync(IReadOnlyDictionary<string, NodeResult>? chosen,
@@ -35,6 +26,10 @@ internal static class ConnectionDiagnostics
         var recent = LauncherLogInspector.ReadRecent();
         Log("新版默认优先 CDN：binaries-fallback.eveonline.com、resources-fallback.eveonline.com。本版分别测速并覆盖。");
         Log(recent.Hosts.Count == 0 ? "未找到本机启动器近期下载域名记录。" : "启动器日志近期请求域名：" + string.Join(", ", recent.Hosts));
+        foreach (var preferred in recent.PreferredHosts)
+            Log($"近期日志实际选择：{(preferred.Key == "binaries" ? "程序补丁" : "游戏资源")} → {preferred.Value}（记录可能已结束）。");
+        foreach (var failure in recent.TimeoutHosts)
+            Log($"近期日志出现连接超时：{failure.Key}；若 hosts 有多个 IP 或旧节点，应用本轮节点会统一整理。");
         foreach (var host in recent.Hosts.Where(h => !NetworkScanner.Domains.Contains(h)))
             Log($"日志包含当前未优选的下载域名 {host}，需要进一步核对该请求。");
         if (recent.Build != null) Log("近期日志中的游戏补丁版本：" + recent.Build);
@@ -72,7 +67,7 @@ internal static class ConnectionDiagnostics
             string? expected = node?.IP ?? (mappings[domain].Count == 1 ? mappings[domain][0] : null);
             Log($"{domain}：hosts = {(mappings[domain].Count == 0 ? "未设置" : string.Join(", ", mappings[domain]))}");
             if (node != null && !mappings[domain].Contains(node.IP)) Log("本轮推荐节点尚未写入 hosts；请先应用节点。");
-            if (mappings[domain].Distinct().Count() > 1) Log("发现重复或 IPv6 映射，需要核对实际连接地址。");
+            if (mappings[domain].Count > 1) Log("发现重复映射，应用本轮节点会统一整理；每个下载域名仅保留一条已验证 IP。");
             try
             {
                 var addresses = await Dns.GetHostAddressesAsync(domain, ct).WaitAsync(TimeSpan.FromSeconds(8), ct);

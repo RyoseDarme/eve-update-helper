@@ -1,44 +1,55 @@
-# 掘墓的EVE更新助手 2.3.0
+# 掘墓的EVE更新助手 2.4.0
 
-开发者：WC飞机杯大王掘墓。Windows 10/11 x64，单文件便携运行，无需另外安装 .NET。
+开发者：WC飞机杯大王掘墓。Windows 10/11 x64 单文件便携运行，无需另外安装 .NET。
 
 [下载最新正式版](https://github.com/RyoseDarme/eve-update-helper/releases/latest) · [项目源码](https://github.com/RyoseDarme/eve-update-helper)
 
-## 新版本提醒
+## 更快地应用节点
 
-本版起支持检查官方 GitHub Releases。启动后后台检查一次，保持运行时每六小时再检查；发现新版本会在主窗口标题旁显示提示。点击提示可查看更新说明并打开本项目的下载页。也可点击“检查更新”手动查询，或在更新窗口取消自动检查。
+“应用并检查”改为“应用节点”。直接使用本轮已通过的测速结果，取消应用前的逐域名重复下载和应用后的自动联网诊断。应用只校验结果完整性与有效期、备份并整理 hosts、回读核对每域仅有一条推荐 IP，再刷新 DNS。它不会发起 HTTPS 请求或再次下载文件。
 
-只提醒正式版本，草稿和预发布不会提示。网络超时、GitHub 访问失败或限流不影响测速；开始测速、诊断或应用时会取消未完成的版本请求。版本检查使用系统网络代理设置，不携带 GitHub 账号、访问令牌、测速结果或启动器日志。自动检查设置保存在当前 Windows 用户的 LocalAppData/EveUpdateHelper/update-settings.json。
+结果有效期仍为30分钟；失败、未完成、缺少域名、域名与测试URL不一致、缺少小请求验证的结果均不可应用。必须先从托盘完全退出启动器，以免旧连接继续使用原节点。已经更换网络或代理路线时应重新测速。
 
-2.2.0 及更早版本没有检查功能，需要手动换成本版一次。更新提醒从已集成本功能的版本开始生效。点击下载只打开浏览器，由用户解压运行新版；不会后台替换程序。
+整理范围覆盖整个 hosts 文件，包括管理块以外的旧记录、混合大小写、同一行多个域名、IPv4与IPv6重复映射。只替换本轮通过验证的受支持域名，保留其他域名、注释与原编码；可选旧界面域名未测得结果时保留原记录。写入前及落盘后均检查每个计划中的域名恰好只有一条正确 IP。保留备份与恢复功能。
 
-官方仓库由 AppInfo.cs 中的 Repository 指定，版本由 AppInfo.Version 与项目文件 Version 指定。
+主窗口会提示已有重复记录。需要排查启动器连接时手动点击“下载诊断”，不会在应用时自动等待该诊断。诊断现可指出日志中的实际 CDN 选择和 -fallback 连接超时。
 
-## EVE 下载测速
+本地写入核对只证明设置已正确保存；真实下载效果应在重开启动器后确认。软件不会为了显示“已生效”而再下载一遍。
 
-默认“快速”，参考 CloudflareST 的 TCP 排序后直接下载方式：随包 CloudFront 网段随机抽样最多2048个 IP，加入 DNS、hosts 和补充节点；200并发 TCP，各连接4次。
+## 更快的默认快速档
 
-主资源使用原有测速文件，最多比较 TCP 排名前10个候选，每个持续10秒，找到3个有效节点后进入其他下载域名确认。其他四域名各持续8秒，包括 binaries-fallback.eveonline.com 和 resources-fallback.eveonline.com。五个下载域名均独立通过才能应用。零速度、错误页、失败或未完成结果不计入可应用节点。
+保留最多2048个CloudFront网段抽样 IP，加上 DNS、hosts 和补充节点。TCP 200并发，先对全池各连接1次；仅对排序前128个以及仍可连接的本机候选复测4次。无需为全池每个IP都等待4次。复测通过后按连接成功率和延迟选择下载候选。
 
-快速最多180秒；标准扩大搜索、最多480秒；精校准不限时。下载速度以网络实际字节计算，“解压读取”仅供对照。快速不等待在线网段更新、资源清单或 HEAD 广筛，标准和精校准保留原有流程。
+主资源最多比较前10个候选，每个持续10秒，找到3个有效资源节点即进入其他域名验证。其余四个下载域名各持续8秒，包含 binaries-fallback.eveonline.com 和 resources-fallback.eveonline.com。每个域名保留独立HTTPS证书、状态码、文件类型、持续时长及小请求验证，不能复制另一域名的成功结果。
 
-## 使用
+主资源在原有候选数量内优先纳入一个可连接的当前hosts或补充节点作基线，避免只按TCP延迟选到下载更慢的节点。不会因此多跑一轮测速。
+其他下载域名也优先保留一个自己的当前节点，再比较资源候选；资源域名下载快不代表启动器更新域名也快，每个域名仍须实际下载通过。
 
-1. 解压运行 EXE，关闭全局代理/TUN 后点击“开始测速”。
-2. 测速结束，从托盘完全退出 EVE 启动器，点击“应用并检查”。
-3. 允许管理员权限，完成后重新打开启动器更新。可用“恢复原设置”还原助手修改。
+找到至少一个有效主资源节点后，会为其他域名预留时间，必要时提前停止比较，最多收集3个有效主资源节点。快速档等待连接/响应头最多6秒；失败域名先让其他域名完成首轮验证，再轮流重试，避免某个fallback超时耗尽全部时间。小请求仍保留原有3次验证及12秒总超时；网络异常时不能保证180秒内获得全部结果，未完整通过时禁止应用。
 
-测速和诊断本身不修改 hosts；应用有备份。保留启动器连接诊断、VPN 域名导出、补充节点与日志导出。不自动清理账号、SharedCache 或游戏设置。
+主资源沿用用户提供的历史测试文件：
+https://resources.eveonline.com/d2/d218fb784d254413_60f784f44054fcc251a3afe5ac301c3f
 
-## 构建与验证
+快速最多180秒，可以提前完成；标准最多480秒；精校准不限时。标准、精校准的搜索范围和测量时长保持不变。TCP筛选只是候选排序，不能替代真实下载验证，也不保证找到全球最快节点。
 
-需要 Windows 和 .NET 8 SDK，在源码目录运行 build.ps1。发布为 win-x64 的 self-contained 单文件。验证命令：
+## 使用与更新
+
+1. 关闭全局代理/TUN后运行EXE，默认快速档，点“开始测速”。
+2. 完成后从托盘完全退出EVE启动器，再点“应用节点”并允许管理员权限。
+3. 应用完成后重开启动器。若仍有问题，再点“下载诊断”或导出日志。
+
+保留GitHub Releases更新提醒、手动检查、更新说明、备份恢复、VPN域名导出。启动后后台检查正式版本，运行期间每6小时检查；开始测速时取消版本请求。版本检查遵循系统代理，EVE节点测速为直连。更新只打开浏览器，不自动替换EXE。
+
+## 验证与构建
+
+发行包附检查报告，覆盖真实临时hosts文件的旧四域名管理块与外部fallback重复清理、备份恢复、BOM编码、过期结果拒绝、启动器运行时拒绝，以及快速TCP两阶段筛选。测试不替用户修改系统hosts。
+
+需要Windows与.NET 8 SDK，运行build.ps1。验证入口：
 
 ```powershell
 .\dist\EveUpdateHelper.exe --self-test C:\temp\self-test.txt
-.\dist\EveUpdateHelper.exe --check-update C:\temp\update-check.json
+.\dist\EveUpdateHelper.exe --probe-mode C:\temp\quick.json Quick
+.\dist\EveUpdateHelper.exe --check-update C:\temp\updates.json
 ```
 
-也保留 --probe-mode、--probe-one 与 --diagnose。诊断入口不写系统 hosts。发行包附离线自检与验证说明。后续发版方法见“发布指南.md”。
-
-历史 README 保留供追溯，当前行为以本文为准。参考项目：[CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest)、[LLC BABEL](https://github.com/LocalizeLimbusCompany/LLC_BABEL)。保留原图标和作者署名，非 CCP 官方软件。
+后续发版见“发布指南.md”；版本号由AppInfo.Version与项目Version共同指定。历史README供追溯，当前行为以本文为准。参考项目：[CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest)、[LLC BABEL](https://github.com/LocalizeLimbusCompany/LLC_BABEL)。保留原图标与作者署名，非CCP官方软件。

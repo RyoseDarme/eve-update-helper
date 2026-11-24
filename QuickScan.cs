@@ -5,14 +5,36 @@ namespace EveUpdateHelper;
 internal static class QuickPlanner
 {
     internal const int PoolLimit = 2048;
+    internal const int ConfirmationLimit = 128;
     internal const int DownloadLimit = 10;
     internal const int DesiredResults = 3;
     internal const int AliasSeconds = 8;
+    internal const int ConnectWaitSeconds = 6;
+    internal static bool CanCompareMore(double remaining, bool hasResult) =>
+        !hasResult || remaining >= 10 + 2 + ConnectWaitSeconds + 4 * (AliasSeconds + 2 + 12 + 2);
     internal static TcpSample[] Rank(IEnumerable<TcpSample> samples) => samples.Where(n => n.Received > 0 && n.Sent > 0)
         .OrderByDescending(n => (double)n.Received / n.Sent).ThenBy(n => n.AverageMs).ToArray();
-    internal static string[] VerificationIPs(IEnumerable<NodeResult> downloaded, IEnumerable<string> own, IEnumerable<TcpSample> tcp) =>
-        downloaded.Where(n => n.Success && NetworkScanner.RankScore(n) > 0).OrderByDescending(NetworkScanner.RankScore).Select(n => n.IP)
+    internal static string[] ForConfirmation(IEnumerable<TcpSample> samples, IEnumerable<string> preferred)
+    {
+        var reachable = Rank(samples);
+        var known = preferred.ToHashSet();
+        return reachable.Take(ConfirmationLimit).Concat(reachable.Where(n => known.Contains(n.IP)))
+            .Select(n => n.IP).Distinct().ToArray();
+    }
+    internal static string[] VerificationIPs(IEnumerable<NodeResult> downloaded, IEnumerable<string> own, IEnumerable<TcpSample> tcp,
+        IEnumerable<string>? current = null) =>
+        Rank(tcp.Where(n => (current ?? []).Contains(n.IP))).Take(1).Select(n => n.IP)
+            .Concat(downloaded.Where(n => n.Success && NetworkScanner.RankScore(n) > 0).OrderByDescending(NetworkScanner.RankScore).Select(n => n.IP))
             .Concat(own).Concat(Rank(tcp).Select(n => n.IP)).Distinct().Take(4).ToArray();
+    internal static TcpSample[] ForDownloads(IEnumerable<TcpSample> samples, IEnumerable<string> current)
+    {
+        var ranked = Rank(samples);
+        var known = current.ToHashSet();
+        // Include one current-route baseline within the existing ten-candidate
+        // limit so a faster established route is not missed by TCP ordering.
+        return ranked.Where(n => known.Contains(n.IP)).Take(1).Concat(ranked).DistinctBy(n => n.IP)
+            .Take(DownloadLimit).ToArray();
+    }
 }
 
 internal sealed partial class NetworkScanner
@@ -40,12 +62,13 @@ internal sealed partial class NetworkScanner
             string source = candidateCache[domain].TryGetValue(ip, out var found) ? found : "CloudFront 快速 TCP 排序候选";
             var node = new NodeResult(domain, ip, source, false, 0, 0, 0, "", "等待实际下载验证", urls[domain]);
             var result = await (hooks?.Download?.Invoke(node, seconds, false, budget.Token) ??
-                TestNode(domain, ip, source, node.TestUrl, true, budget.Token, seconds, log, sampleProgress: Publish, compareDecoded: true));
+                TestNode(domain, ip, source, node.TestUrl, true, budget.Token, seconds, log, sampleProgress: Publish,
+                    compareDecoded: true, connectWaitSeconds: QuickPlanner.ConnectWaitSeconds));
             Publish(result);
             return result;
         }
         log("快速档：参考原程序，TCP 排序后直接下载；最多比较前 10 个候选，凑够 3 个有效资源节点即进入域名确认。");
-        log("采用随包 CloudFront 网段的最多 2048 个抽样 IP，加本机 DNS / 补充节点；无在线网段更新、独立 HEAD 广筛或资源清单下载。");
+        log("最多 2048 个网段抽样 IP 加本机候选：先各连 1 次，只对前 128 个及可连接的本机候选复测 4 次。");
         log("主资源沿用你提供的原测速文件；持续 10 秒。其他下载域名各自确认 8 秒，两个 -fallback 仍独立验证。总时限 180 秒。");
         try
         {
@@ -57,9 +80,9 @@ internal sealed partial class NetworkScanner
                 (Domain: d, IPs: await (hooks?.Dns?.Invoke(d, budget.Token) ?? Candidates(d, budget.Token)))));
             foreach (var discovery in discoveries) candidateCache[discovery.Domain] = discovery.IPs;
             EveDomains.MergeFamilyCandidates(candidateCache);
-            var preferred = candidateCache.Values.SelectMany(p => p.Keys).Distinct();
+            var preferred = candidateCache.Values.SelectMany(p => p.Keys).Distinct().ToArray();
             var pool = preferred.Concat(sampled.Select(p => p.IP)).Distinct().ToArray();
-            log($"TCP 测速：{pool.Length} 个 IP，200 并发，各测 {profile.TcpRepeats} 次，按连接成功率和平均延迟排序。");
+            log($"TCP 粗筛：{pool.Length} 个 IP，200 并发，各连 1 次；保留候选再复测，减少无效等待。");
             using var gate = new SemaphoreSlim(200);
             int completed = 0;
             await Task.WhenAll(pool.Select(async ip =>
@@ -67,23 +90,40 @@ internal sealed partial class NetworkScanner
                 await gate.WaitAsync(budget.Token);
                 try
                 {
-                    tcp[ip] = await (hooks?.Tcp?.Invoke(ip, profile.TcpRepeats, budget.Token) ??
-                        FastScreening.TcpAsync(ip, profile.TcpRepeats, budget.Token));
+                    tcp[ip] = await (hooks?.Tcp?.Invoke(ip, 1, budget.Token) ??
+                        FastScreening.TcpAsync(ip, 1, budget.Token));
                     int count = Interlocked.Increment(ref completed);
                     if (count % 500 == 0) log($"快速 TCP 进度 {count}/{pool.Length}…");
                 }
                 finally { gate.Release(); }
             }));
-            var ranked = QuickPlanner.Rank(tcp.Values);
-            log($"TCP 完成：{tcp.Count} 个已测，{ranked.Length} 个可连接；开始直接下载，失败和零速度不计入有效节点。");
+            var shortlist = QuickPlanner.ForConfirmation(tcp.Values, preferred);
+            log($"TCP 粗筛完成：{tcp.Count} 个已测，{tcp.Values.Count(n => n.Received > 0)} 个可连接；仅复测 {shortlist.Length} 个候选，各 {profile.TcpRepeats} 次。");
+            var confirmed = new ConcurrentDictionary<string, TcpSample>();
+            await Task.WhenAll(shortlist.Select(async ip =>
+            {
+                await gate.WaitAsync(budget.Token);
+                try
+                {
+                    var sample = await (hooks?.Tcp?.Invoke(ip, profile.TcpRepeats, budget.Token) ??
+                        FastScreening.TcpAsync(ip, profile.TcpRepeats, budget.Token));
+                    confirmed[ip] = sample;
+                    tcp[ip] = sample;
+                }
+                finally { gate.Release(); }
+            }));
+            var ranked = QuickPlanner.Rank(confirmed.Values);
+            log($"TCP 候选复测完成：{ranked.Length} 个可连接；按成功率和延迟排序后直接下载，失败和零速度不计入有效节点。");
             var downloaded = new List<NodeResult>();
-            foreach (var candidate in ranked.Take(QuickPlanner.DownloadLimit))
+            var currentResourceIPs = candidateCache[EveDomains.Resources]
+                .Where(p => p.Value.Contains("系统") || p.Value.Contains("用户补充")).Select(p => p.Key).ToArray();
+            if (currentResourceIPs.Length > 0) log("主资源候选包含当前 hosts / 补充节点基线；与新候选共用原有数量，不额外重复测速。");
+            foreach (var candidate in QuickPlanner.ForDownloads(ranked, currentResourceIPs))
             {
                 budget.Token.ThrowIfCancellationRequested();
                 // Reserve one complete independent measurement for the other
                 // four download domains before comparing more resource nodes.
-                double reserve = (DownloadDomains.Length - 1) * (QuickPlanner.AliasSeconds + 4);
-                if (downloaded.Count > 0 && budget.RemainingSeconds < profile.SampleSeconds + 5 + reserve)
+                if (!QuickPlanner.CanCompareMore(budget.RemainingSeconds, downloaded.Count > 0))
                 {
                     log("优先保留剩余时间完成其他下载域名验证，停止增加资源候选。");
                     break;
@@ -102,10 +142,18 @@ internal sealed partial class NetworkScanner
             {
                 var winner = downloaded.OrderByDescending(RankScore).First();
                 log($"资源优胜节点 {winner.IP}，网络持续 {winner.SpeedMBps:F2} MiB/s；开始用真实域名分别确认其他下载。");
-                foreach (var domain in DownloadDomains.Where(d => d != EveDomains.Resources))
+                var pending = DownloadDomains.Where(d => d != EveDomains.Resources)
+                    .ToDictionary(d => d, d => new Queue<string>(QuickPlanner.VerificationIPs(downloaded, candidateCache[d].Keys, ranked,
+                        candidateCache[d].Where(p => p.Value.Contains("系统") || p.Value.Contains("用户补充")).Select(p => p.Key))));
+                // Give every required domain one attempt before retrying a failed
+                // domain; otherwise fallback timeouts can starve launcher updates.
+                while (pending.Values.Any(q => q.Count > 0))
                 {
-                    foreach (var ip in QuickPlanner.VerificationIPs(downloaded, candidateCache[domain].Keys, ranked))
+                    foreach (var domain in pending.Keys.ToArray())
                     {
+                        var queue = pending[domain];
+                        if (queue.Count == 0) continue;
+                        var ip = queue.Dequeue();
                         budget.Token.ThrowIfCancellationRequested();
                         if (budget.RemainingSeconds < QuickPlanner.AliasSeconds + 5)
                         {
@@ -114,8 +162,8 @@ internal sealed partial class NetworkScanner
                         }
                         log($"独立确认 {domain} → {ip}，持续 {QuickPlanner.AliasSeconds} 秒。");
                         var result = await Download(domain, ip, QuickPlanner.AliasSeconds);
-                        if (IsQuickResult(result, domain)) break;
-                        log("该域名未通过，尝试下一候选：" + result.Detail);
+                        if (IsQuickResult(result, domain)) queue.Clear();
+                        else log("该域名未通过，先完成其他域名，再尝试下一候选：" + result.Detail);
                     }
                 }
                 if (budget.RemainingSeconds > 4 && candidateCache[Domains[2]].Count > 0)

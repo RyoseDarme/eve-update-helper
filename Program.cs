@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 
 namespace EveUpdateHelper;
 
@@ -79,7 +79,7 @@ internal static class Program
                     ApplicationConfiguration.Initialize();
                     using var dialog = new OperationDialog(false);
                     dialog.Show();
-                    dialog.UpdateProgress(new OperationProgress(30, "复核节点 2/6", "binaries-fallback.eveonline.com\r\n正在确认节点可下载，尚未修改 hosts。"));
+                    dialog.UpdateProgress(new OperationProgress(65, "核对已写入的节点", "已整理两个 -fallback 的旧记录。\r\n仅核对本地 hosts，不重复下载测速。"));
                     Application.DoEvents();
                     using var bitmap = new Bitmap(dialog.Width, dialog.Height);
                     dialog.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));

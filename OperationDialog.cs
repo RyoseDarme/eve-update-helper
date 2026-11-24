@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 
 namespace EveUpdateHelper;
 
@@ -28,7 +28,7 @@ internal sealed class OperationDialog : Form
         layout.Controls.AddRange([buttons, elapsed, bar, detail, heading]);
         heading.ForeColor = Color.FromArgb(27, 41, 68);
         heading.Text = restore ? "正在恢复设置" : "正在应用更新节点";
-        detail.Text = "正在准备，请在系统提示中允许管理员权限。\r\n接下来会复核节点、备份 hosts，并检查是否生效。";
+        detail.Text = "正在准备，请在系统提示中允许管理员权限。\r\n将直接应用已通过的测速结果，备份并整理 hosts，不再重复下载。";
         timer.Tick += (_, _) => { elapsed.Text = $"已用时 {watch.Elapsed.TotalSeconds:F0} 秒 · 按操作步骤显示进度"; bar.Pulse(); };
         timer.Start();
         close.Click += (_, _) => Close();

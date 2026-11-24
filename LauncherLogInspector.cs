@@ -9,6 +9,8 @@ internal static class LauncherLogInspector
     {
         internal List<string> Progress { get; init; } = [];
         internal string? Build { get; init; }
+        internal Dictionary<string, string> PreferredHosts { get; init; } = new();
+        internal Dictionary<string, int> TimeoutHosts { get; init; } = new();
     }
     internal static Findings Parse(string text)
     {
@@ -16,8 +18,19 @@ internal static class LauncherLogInspector
         var files = NetworkScanner.DownloadDomains.ToDictionary(d => d, _ => new List<string>());
         var progress = new List<string>();
         string? build = null;
+        var preferred = new Dictionary<string, string>();
+        var timeouts = new Dictionary<string, int>();
         foreach (var line in text.Split('\n'))
         {
+            var preference = Regex.Match(line, @"\[cdn-hosts\]\s+Preferring https://([a-zA-Z0-9.-]+)/ for (binaries|resources)\b");
+            if (preference.Success && NetworkScanner.DownloadDomains.Contains(preference.Groups[1].Value))
+                preferred[preference.Groups[2].Value] = preference.Groups[1].Value;
+            var failed = Regex.Match(line, @"connect ETIMEDOUT ([a-zA-Z0-9.-]+):443\b");
+            if (failed.Success && NetworkScanner.DownloadDomains.Contains(failed.Groups[1].Value))
+            {
+                string host = failed.Groups[1].Value;
+                timeouts[host] = timeouts.GetValueOrDefault(host) + 1;
+            }
             var buildMatch = Regex.Match(line, @"\[server-manager\]\s+Starting download of build (\d{1,12})\b");
             if (buildMatch.Success) build = buildMatch.Groups[1].Value;
             var status = Regex.Match(line, @"\[server-manager\]\s+(Downloaded [\d.]+ (?:[kKMGT]iB|B)/[\d.]+ (?:[kKMGT]iB|B) at [\d.]+ (?:[kKMGT]iB|B)/s|Downloading \d+ (?:binary|resource) files \([\d.]+ [A-Za-z]+\))");
@@ -35,7 +48,8 @@ internal static class LauncherLogInspector
                 }
             }
         }
-        return new Findings(hosts.ToList(), files) { Progress = progress.TakeLast(6).ToList(), Build = build };
+        return new Findings(hosts.ToList(), files) { Progress = progress.TakeLast(6).ToList(), Build = build,
+            PreferredHosts = preferred, TimeoutHosts = timeouts };
     }
 
     internal static Findings ReadRecent()
