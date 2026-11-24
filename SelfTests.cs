@@ -161,7 +161,7 @@ internal static class SelfTests
                 testElapsedSeconds: () => highSpeedClock).GetAwaiter().GetResult();
             Check(highSpeed.Success && highSpeed.Bytes > 2L * 1024 * 1024 * 1024 && highSpeed.MeasuredSeconds >= 30 && highSpeed.SpeedMBps > 70,
                 "70+ MiB/s connection completes thirty-second sample beyond the old 2GB ceiling");
-            Check(ScanProfile.For(ScanMode.Quick).SurveySeconds == 0 && ScanProfile.For(ScanMode.Quick).TotalSeconds == 180 &&
+            Check(ScanProfile.For(ScanMode.Quick).SurveySeconds == 36 && ScanProfile.For(ScanMode.Quick).TotalSeconds == 180 &&
                 ScanProfile.For(ScanMode.Standard).TotalSeconds == 480 && ScanProfile.For(ScanMode.Precise).TotalSeconds == 0,
                 "quick has three-minute budget, standard retains eight minutes, precise has no global deadline");
             var quickOrder = QuickPlanner.Rank([new("18.65.14.45", 1, 1, 4), new("65.8.76.123", 50, 4, 4), new("3.170.229.35", 20, 4, 4), new("13.1.1.1", 0, 0, 4)]);
@@ -175,33 +175,50 @@ internal static class SelfTests
             Check(QuickPlanner.ForConfirmation([], ["18.65.14.1"]).Length == 0,
                 "failed coarse TCP pool produces no download candidates");
             var baselineOrder = QuickPlanner.ForDownloads(coarse, ["18.65.14.220"]);
-            Check(baselineOrder.Length == 10 && baselineOrder[0].IP == "18.65.14.220" && baselineOrder.Select(n => n.IP).Distinct().Count() == 10,
+            Check(baselineOrder.Length == 12 && baselineOrder[0].IP == "18.65.14.220" && baselineOrder.Select(n => n.IP).Distinct().Count() == 12,
                 "quick includes one current hosts baseline within its original candidate limit without repeating an IP");
             var quickCalls = new List<(string Domain, string IP, int Seconds)>();
             var ownVerification = QuickPlanner.VerificationIPs([example with { Success = true, SpeedMBps = 80 }],
                 ["13.35.202.129"], [new("13.35.202.129", 100, 4, 4), new(example.IP, 20, 4, 4)], ["13.35.202.129"]);
             Check(ownVerification[0] == "13.35.202.129" && ownVerification.Contains(example.IP) && ownVerification.Distinct().Count() == ownVerification.Length,
                 "each domain retains its own current route before cross-domain resource candidates without duplicating an IP");
-            Check(!QuickPlanner.CanCompareMore(100, true) && QuickPlanner.CanCompareMore(150, true) && QuickPlanner.CanCompareMore(100, false),
-                "quick reserves time for remaining domains after obtaining a resource result instead of exhausting comparisons");
+            Check(QuickPlanner.SurveyWindow(100) == 0 && QuickPlanner.SurveyWindow(130) == 20 && QuickPlanner.SurveyWindow(180) == 36,
+                "quick caps exploration time and preserves remaining domain verification time");
+            var concentrated = Enumerable.Range(1, 200).Select(i => new TcpSample("18.65.14." + i, i, 1, 1))
+                .Append(new TcpSample("3.170.229.33", 500, 1, 1));
+            var diversified = QuickPlanner.ForConfirmation(concentrated, []);
+            Check(diversified.Contains("3.170.229.33") && diversified.Length == 128 &&
+                QuickPlanner.ForDownloads(concentrated, []).Any(n => n.IP == "3.170.229.33"),
+                "higher-latency network remains in TCP confirmation and download exploration instead of being crowded out by one prefix");
+            var quickSurveys = new List<string>();
             var tcpCalls = new System.Collections.Concurrent.ConcurrentBag<(string IP, int Repeats)>();
-            ScanResult RunQuickFixture(bool failFallback = false, bool zeroFirst = false, bool largePool = false)
+            ScanResult RunQuickFixture(bool failFallback = false, bool zeroFirst = false, bool largePool = false, bool slowFirstAlias = false, bool slowFirstResource = false)
             {
                 quickCalls.Clear();
+                quickSurveys.Clear();
                 tcpCalls.Clear();
                 var fastHooks = new ScanHooks
                 {
                     Catalog = _ => Task.FromResult(new CdnCatalog([new(largePool ? "65.0.0.0/12" : "65.8.0.0/20", "GLOBAL")], "fixture", "fixture")),
                     Dns = hooks.Dns, Tcp = (ip, repeats, token) => { tcpCalls.Add((ip, repeats)); return hooks.Tcp!(ip, repeats, token); },
                     Https = (_, _) => throw new Exception("Quick must not run the HEAD survey"),
-                    Survey = (_, _) => throw new Exception("Quick must not run short survey downloads"),
+                    Survey = (n, _) =>
+                    {
+                        quickSurveys.Add(n.IP);
+                        return Task.FromResult(new SurveySample(n with { Bytes = 128 * 1024, MeasuredSeconds = 2,
+                            InitialSpeedMBps = n.IP == "18.65.14.45" ? 1 : 80 }, true));
+                    },
                     Parallel = (_, _) => throw new Exception("Quick must not run parallel calibration"),
                     Download = (n, seconds, _, _) =>
                     {
+                        bool firstResource = !quickCalls.Any(call => call.Domain == EveDomains.Resources);
+                        bool firstAlias = !quickCalls.Any(call => call.Domain == EveDomains.BinaryFallback);
                         quickCalls.Add((n.Domain, n.IP, seconds));
-                        bool fail = failFallback && n.Domain == EveDomains.BinaryFallback || zeroFirst && n.Domain == EveDomains.Resources && n.IP == "18.65.14.45";
+                        bool fail = failFallback && n.Domain == EveDomains.BinaryFallback || zeroFirst && n.Domain == EveDomains.Resources && firstResource;
                         return Task.FromResult(n with { Success = !fail, Bytes = fail ? 0 : 1024 * 1024,
-                            SpeedMBps = fail || n.Domain == NetworkScanner.Domains[2] ? 0 : n.IP == "18.65.14.45" ? 5 : 80,
+                            SpeedMBps = fail || n.Domain == NetworkScanner.Domains[2] ? 0 :
+                                (slowFirstAlias && firstAlias && n.Domain == EveDomains.BinaryFallback ||
+                                 slowFirstResource && firstResource && n.Domain == EveDomains.Resources) ? 1 : n.IP == "18.65.14.45" ? 5 : 80,
                             SmallFileMBps = fail ? 0 : 1, LatencyMs = 50, MeasuredSeconds = seconds, RequiredSeconds = seconds, Detail = fail ? "fixture failure" : "fixture complete" });
                     }
                 };
@@ -209,14 +226,30 @@ internal static class SelfTests
                     mode: ScanMode.Quick, hooks: fastHooks).RunAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
             var quickPipeline = RunQuickFixture();
-            Check(NetworkScanner.CanApply(quickPipeline) && quickPipeline.Coverage is { TcpProbed: 17, HttpsPlanned: 0, DownloadSurveyed: 0 },
-                "complete quick pipeline skips metadata, separate HTTPS survey and calibration while producing independently applicable domains");
-            Check(quickCalls.Count(n => n.Domain == EveDomains.Resources) == 3 && quickCalls.Count < QuickPlanner.DownloadLimit,
-                "quick ends resource comparison after three valid results instead of exhausting every download candidate");
-            Check(NetworkScanner.DownloadDomains.Where(d => d != EveDomains.Resources).All(d => quickCalls.Count(n => n.Domain == d && n.Seconds == 8) == 1),
+            Check(NetworkScanner.CanApply(quickPipeline) && quickPipeline.Coverage is { TcpProbed: 17, HttpsPlanned: 0, DownloadSurveyed: 12 },
+                "complete quick pipeline surveys twelve downloads then produces independently validated domains without metadata or HEAD screening");
+            Check(quickCalls.First().Domain == EveDomains.Resources && quickCalls.First().IP != "18.65.14.45" &&
+                quickPipeline.Best[EveDomains.Resources].SpeedMBps == 80 && quickSurveys.Count == 12,
+                "quick finds faster higher-latency downloads beyond the one-MiB low-latency baseline before full verification");
+            Check(NetworkScanner.DownloadDomains.Where(d => d != EveDomains.Resources).All(d => quickCalls.Any(n => n.Domain == d && n.Seconds == 8)),
                 "quick independently downloads every other required hostname for eight seconds without copying a resource success");
             Check(NetworkScanner.DownloadDomains.All(d => quickPipeline.Best[d].Domain == d && new Uri(quickPipeline.Best[d].TestUrl).Host == d),
                 "quick winners preserve actual individual TLS hostnames and URLs");
+            int lastRequiredFirstAttempt = NetworkScanner.DownloadDomains.Max(d => quickCalls.FindIndex(n => n.Domain == d));
+            Check(quickCalls.Take(lastRequiredFirstAttempt + 1).Count(n => n.Domain == EveDomains.Resources) == 1 &&
+                quickCalls.Skip(lastRequiredFirstAttempt + 1).Any(n => n.Domain != NetworkScanner.Domains[2]),
+                "quick completes required domains before using spare time for additional download comparisons");
+            var surveyOnly = new ScanResult([], quickPipeline.Best.ToDictionary(p => p.Key, p => p.Value with
+                { Success = false, RequiredSeconds = 0, SpeedMBps = 0, InitialSpeedMBps = 2000 }), DateTime.Now);
+            Check(!NetworkScanner.CanApply(surveyOnly), "a spectacular short survey cannot be copied into an applicable recommendation");
+            var improvedSlowAlias = RunQuickFixture(slowFirstAlias: true);
+            Check(improvedSlowAlias.Best[EveDomains.BinaryFallback].SpeedMBps == 80 &&
+                quickCalls.Count(n => n.Domain == EveDomains.BinaryFallback) > 1,
+                "spare budget replaces a one-MiB first successful domain with a faster independently validated candidate");
+            var slowBurst = RunQuickFixture(slowFirstResource: true);
+            Check(slowBurst.Best[EveDomains.Resources].SpeedMBps == 80 &&
+                quickCalls.TakeWhile(n => n.Domain == EveDomains.Resources).Count() == 2,
+                "one-MiB sustained result after a fast short burst triggers a second candidate while independent domain time remains reserved");
             var quickFailedAlias = RunQuickFixture(failFallback: true);
             int secondFallback = quickCalls.FindIndex(quickCalls.FindIndex(n => n.Domain == EveDomains.BinaryFallback) + 1,
                 n => n.Domain == EveDomains.BinaryFallback);
@@ -227,9 +260,9 @@ internal static class SelfTests
                 quickCalls.Count(n => n.Domain == EveDomains.BinaryFallback) > 1,
                 "failed quick fallback verification retries candidates and blocks hosts application if all fail");
             var quickZero = RunQuickFixture(zeroFirst: true);
-            Check(quickCalls.Count(n => n.Domain == EveDomains.Resources) == 4 &&
+            Check(quickCalls.TakeWhile(n => n.Domain == EveDomains.Resources).Count() == 2 &&
                 !quickZero.Best.Values.Any(n => n.Bytes == 0 && NetworkScanner.DownloadDomains.Contains(n.Domain)),
-                "zero-speed and failed downloads do not count toward three valid quick nodes");
+                "fastest short sample failing sustained verification falls back to another candidate without recommending its burst");
             var quickLimited = RunQuickFixture(largePool: true);
             Check(quickLimited.Coverage is { SampledIPs: 2048, TcpProbed: 2049 } && NetworkScanner.CanApply(quickLimited),
                 "quick bounds the sampled CDN pool while retaining the independently supplied DNS candidate");

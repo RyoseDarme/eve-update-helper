@@ -6,7 +6,7 @@ internal sealed record ScanProfile(ScanMode Mode, string Name, int TotalSeconds,
 {
     internal static ScanProfile For(ScanMode mode) => mode switch
     {
-        ScanMode.Quick => new(mode, "快速", 180, 10, 0, 4, 0),
+        ScanMode.Quick => new(mode, "快速", 180, 10, QuickPlanner.SurveySeconds, 4, 0),
         ScanMode.Standard => new(mode, "标准", 480, 20, 45, 4, 20),
         _ => new(mode, "精校准", 0, 20, 180, 6, 45)
     };

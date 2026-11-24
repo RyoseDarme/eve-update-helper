@@ -61,7 +61,7 @@ internal sealed partial class MainForm : Form
         toolbar.Controls.Add(new Label { Text = "测速档位", AutoSize = true, Margin = new Padding(0, 12, 8, 0) });
         duration.Items.AddRange(["快速", "标准", "精校准"]); duration.SelectedIndex = 0;
         var modeTip = new ToolTip();
-        modeTip.SetToolTip(duration, "默认快速：TCP 排序后直接测速，找到3个有效资源节点即确认其他域名，最多3分钟。标准扩大搜索，最多8分钟；精校准不限时。");
+        modeTip.SetToolTip(duration, "默认快速：跨网段下载初测后按实际下载速度选点，再做持续验证，最多3分钟；有余量继续比较较慢域名。标准扩大搜索，最多8分钟；精校准不限时。");
         duration.DrawMode = DrawMode.Normal;
         duration.ForeColor = Color.FromArgb(27, 41, 68);
         toolbar.Controls.Add(duration);
@@ -77,7 +77,7 @@ internal sealed partial class MainForm : Form
         toolbar.Controls.Add(export);
         apply.Enabled = false; cancel.Enabled = false;
         layout.Controls.Add(toolbar, 0, 2);
-        summary.Text = "默认快速：参考原程序，TCP 先粗筛再复测候选，找到 3 个有效资源节点即确认其他域名。\r\n主测速 10 秒，其余下载域名独立确认 8 秒；快速最多 3 分钟。标准扩大搜索，精校准保留长测。\r\n含两个 -fallback；应用时清理重复记录，不再联网复测。测速后完全退出启动器，再应用节点。";
+        summary.Text = "默认快速：跨网段初测最多12个候选，按实际下载速度选点，再做完整验证。\r\n主测速10秒，其余四域各8秒；有余量继续比较较慢域名。快速最多3分钟，标准扩大搜索。\r\n表中初测仅供排序；推荐值须通过持续下载和小请求。应用时整理hosts，不再重复测速。";
         summary.Font = new Font("Microsoft YaHei UI", 9);
         summary.Dock = DockStyle.Fill;
         summary.Padding = new Padding(12, 10, 12, 0);
